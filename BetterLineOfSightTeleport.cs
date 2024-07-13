@@ -1,6 +1,6 @@
 ﻿/*
  * Copyright (C) 2024 Game4Freak.io
- * Your use of this mod indicates acceptance of the Game4Freak EULA.
+ * This mod is provided under the Game4Freak EULA.
  * Full legal terms can be found at https://game4freak.io/eula/
  */
 
@@ -13,14 +13,16 @@ using UnityEngine;
 namespace Oxide.Plugins
 {
     [Info("Better Line Of Sight Teleport", "VisEntities", "1.0.0")]
-    [Description(" ")]
+    [Description("Improves the teleportation mechanism of the native teleportlos command.")]
     public class BetterLineOfSightTeleport : RustPlugin
     {
         #region Fields
 
         private static BetterLineOfSightTeleport _plugin;
         private static Configuration _config;
-                
+        private const int LAYER_GROUND = Layers.Mask.World | Layers.Mask.Terrain | Layers.Mask.Construction;
+        private const float DEBUG_DURATION = 10f;
+    
         #endregion Fields
 
         #region Configuration
@@ -30,17 +32,20 @@ namespace Oxide.Plugins
             [JsonProperty("Version")]
             public string Version { get; set; }
 
-            [JsonProperty("Entity Short Prefab Names")]
-            public List<string> EntityShortPrefabNames { get; set; }
-
             [JsonProperty("Teleport Distance Limit")]
             public float TeleportDistanceLimit { get; set; }
-            
-            [JsonProperty("Entity Detection Radius")]
-            public float EntityDetectionRadius { get; set; }
 
-            [JsonProperty("Number Of Check Points")]
-            public int NumberOfCheckPoints { get; set; }
+            [JsonProperty("Entity Short Prefab Names To Prioritize")]
+            public List<string> EntityShortPrefabNamesToPrioritize { get; set; }
+            
+            [JsonProperty("Radius For Detecting Nearby Entities")]
+            public float RadiusForDetectingNearbyEntities { get; set; }
+
+            [JsonProperty("Number Of Check Points During Teleportation")]
+            public int NumberOfCheckPointsDuringTeleportation { get; set; }
+
+            [JsonProperty("Enable Debug")]
+            public bool EnableDebug { get; set; }
         }
 
         protected override void LoadConfig()
@@ -82,7 +87,8 @@ namespace Oxide.Plugins
             return new Configuration
             {
                 Version = Version.ToString(),
-                EntityShortPrefabNames = new List<string>
+                TeleportDistanceLimit = 900f,
+                EntityShortPrefabNamesToPrioritize = new List<string>
                 {
                     "bradleyapc",
                     "patrolhelicopter",
@@ -91,12 +97,12 @@ namespace Oxide.Plugins
                     "scraptransporthelicopter",
                     "rhib",
                     "rowboat",
-                    "testridablehorse",
-                    "cargoshiptest"
+                    "cargoshiptest",
+                    "ch47scientists.entity"
                 },
-                TeleportDistanceLimit = 900f,
-                EntityDetectionRadius = 40f,
-                NumberOfCheckPoints = 15
+                RadiusForDetectingNearbyEntities = 40f,
+                NumberOfCheckPointsDuringTeleportation = 15,
+                EnableDebug = false
             };
         }
 
@@ -118,68 +124,88 @@ namespace Oxide.Plugins
         private object OnServerCommand(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
-            if (player == null)
+            if (player == null || !player.IsAdmin)
                 return null;
 
             if (arg.cmd.FullName != "global.teleportlos")
                 return null;
 
-            HandleTeleportCommand(player);
+            Teleport(player);
             return true;
         }
 
-        private void HandleTeleportCommand(BasePlayer player)
+        #endregion Oxide Hooks
+
+        #region Custom Teleportation
+
+        private void Teleport(BasePlayer player)
         {
             Ray ray = player.eyes.HeadRay();
             float maximumDistance = _config.TeleportDistanceLimit;
-            float detectionRadius = _config.EntityDetectionRadius;
-            int intervalCount = _config.NumberOfCheckPoints;
-            float intervalDistance = maximumDistance / intervalCount;
+            float entityDetectionRadius = _config.RadiusForDetectingNearbyEntities;
+            int numberOfTeleportCheckpoints = _config.NumberOfCheckPointsDuringTeleportation;
+            float distanceBetweenCheckpoints = maximumDistance / numberOfTeleportCheckpoints;
 
-            Vector3 teleportPosition = ray.origin + ray.direction * maximumDistance;
-            DrawUtil.Line(player, 5f, Color.red, ray.origin, teleportPosition);
+            Vector3 initialTeleportPosition = ray.origin + ray.direction * maximumDistance;
+
+            if (_config.EnableDebug)
+                DrawUtil.Arrow(player, DEBUG_DURATION, Color.black, ray.origin, initialTeleportPosition, 5.0f);
 
             BaseEntity closestEntity = null;
             float closestDistance = float.MaxValue;
 
-            for (int i = 0; i <= intervalCount; i++)
+            for (int i = 0; i <= numberOfTeleportCheckpoints; i++)
             {
-                Vector3 checkPosition = ray.origin + ray.direction * (i * intervalDistance);
-                DrawUtil.Sphere(player, 5f, Color.blue, checkPosition, detectionRadius);
+                Vector3 checkPosition = ray.origin + ray.direction * (i * distanceBetweenCheckpoints);
 
-                List<BaseEntity> entities = FindEntitiesOfType<BaseEntity>(checkPosition, detectionRadius, 1218652417, _config.EntityShortPrefabNames);
-                foreach (BaseEntity entity in entities)
+                if (_config.EnableDebug)
+                    DrawUtil.Sphere(player, DEBUG_DURATION, Color.black, checkPosition, entityDetectionRadius);
+
+                if (i != 0)
                 {
-                    float distance = Vector3.Distance(checkPosition, entity.transform.position);
-                    if (distance < closestDistance)
+                    // It has to be this layer; otherwise some entities like the patrol helicopter won't be detected for whatever reason.
+                    List<BaseEntity> entities = FindEntitiesOfType<BaseEntity>(checkPosition, entityDetectionRadius, 1218652417, _config.EntityShortPrefabNamesToPrioritize);
+                    foreach (BaseEntity entity in entities)
                     {
-                        closestEntity = entity;
-                        closestDistance = distance;
+                        float distance = Vector3.Distance(checkPosition, entity.transform.position);
+                        if (distance < closestDistance)
+                        {
+                            closestEntity = entity;
+                            closestDistance = distance;
+                        }
+                    }
+
+                    Pool.FreeList(ref entities);
+
+                    if (closestEntity != null)
+                    {
+                        initialTeleportPosition = closestEntity.transform.position;
+
+                        if (_config.EnableDebug)
+                        {
+                            DrawUtil.Box(player, DEBUG_DURATION, Color.green, initialTeleportPosition, 1f);
+                            DrawUtil.Text(player, DEBUG_DURATION, Color.white, initialTeleportPosition, closestEntity.ShortPrefabName);
+                        }
+
+                        break;
                     }
                 }
 
-                Pool.FreeList(ref entities);
-
-                if (closestEntity != null)
+                if (Physics.Raycast(checkPosition, ray.direction, out RaycastHit raycastHit, distanceBetweenCheckpoints, LAYER_GROUND))
                 {
-                    teleportPosition = closestEntity.transform.position;
-                    DrawUtil.Box(player, 5f, Color.green, teleportPosition, 1f);
-                    break;
-                }
+                    initialTeleportPosition = raycastHit.point;
 
-                if (Physics.Raycast(checkPosition, ray.direction, out RaycastHit terrainHit, intervalDistance, Layers.Mask.Terrain | Layers.Mask.World))
-                {
-                    teleportPosition = terrainHit.point;
-                    DrawUtil.Box(player, 5f, Color.green, teleportPosition, 1f);
+                    if (_config.EnableDebug)
+                        DrawUtil.Box(player, DEBUG_DURATION, Color.green, initialTeleportPosition, 1f);
+
                     break;
                 }
             }
 
-            player.Teleport(teleportPosition);
-            DrawUtil.Text(player, 5f, Color.white, teleportPosition, $"Teleported to {teleportPosition}");
+            player.Teleport(initialTeleportPosition);
         }
 
-        #endregion Oxide Hooks
+        #endregion Custom Teleportation
 
         #region Helper Functions
 
@@ -208,34 +234,6 @@ namespace Oxide.Plugins
         #endregion Helper Functions
 
         #region Helper Classes
-
-        public static class TerrainUtil
-        {
-            public static bool GetGroundInfo(Vector3 startPosition, out RaycastHit raycastHit, float range, LayerMask layer)
-            {
-                return Physics.Linecast(startPosition + new Vector3(0.0f, range, 0.0f), startPosition - new Vector3(0.0f, range, 0.0f), out raycastHit, layer);
-            }
-
-            public static bool GetGroundInfo(Vector3 startPosition, out RaycastHit raycastHit, float range, LayerMask layer, Transform ignoreTransform = null)
-            {
-                startPosition.y += 0.25f;
-                range += 0.25f;
-                raycastHit = default;
-
-                RaycastHit hit;
-                if (!GamePhysics.Trace(new Ray(startPosition, Vector3.down), 0f, out hit, range, layer, QueryTriggerInteraction.UseGlobal, null))
-                    return false;
-
-                if (ignoreTransform != null && hit.collider != null
-                    && (hit.collider.transform == ignoreTransform || hit.collider.transform.IsChildOf(ignoreTransform)))
-                {
-                    return GetGroundInfo(startPosition - new Vector3(0f, 0.01f, 0f), out raycastHit, range, layer, ignoreTransform);
-                }
-
-                raycastHit = hit;
-                return true;
-            }
-        }
 
         private static class DrawUtil
         {
