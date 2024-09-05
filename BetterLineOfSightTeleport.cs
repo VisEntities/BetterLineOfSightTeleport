@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Better Line Of Sight Teleport", "VisEntities", "1.0.0")]
+    [Info("Better Line Of Sight Teleport", "VisEntities", "1.0.1")]
     [Description("Improves the teleportation mechanism of the native teleportlos command.")]
     public class BetterLineOfSightTeleport : RustPlugin
     {
@@ -175,7 +175,7 @@ namespace Oxide.Plugins
                         }
                     }
 
-                    Pool.FreeList(ref entities);
+                    Pool.FreeUnmanaged(ref entities);
 
                     if (closestEntity != null)
                     {
@@ -212,7 +212,7 @@ namespace Oxide.Plugins
         private static List<T> FindEntitiesOfType<T>(Vector3 position, float radius, LayerMask layer, List<string> entityPrefabs) where T : BaseEntity
         {
             int hits = Physics.OverlapSphereNonAlloc(position, radius, Vis.colBuffer, layer, QueryTriggerInteraction.Collide);
-            List<T> entities = Pool.GetList<T>();
+            List<T> entities = Pool.Get<List<T>>();
 
             for (int i = 0; i < hits; i++)
             {
